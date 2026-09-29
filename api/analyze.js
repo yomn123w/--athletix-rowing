@@ -34,8 +34,11 @@ module.exports = async function handler(req, res) {
     }
     if (!upstream.ok) {
       const code = data.error?.code;
+      const type = data.error?.type;
+      const safeCode = value => typeof value === 'string' && /^[\w.-]{1,80}$/.test(value) ? value : 'UNKNOWN';
+      console.error('ATHLETIX_AI_UPSTREAM', { status: upstream.status, code: safeCode(code), type: safeCode(type) });
       if (upstream.status === 401) return fail(502, 'INVALID_KEY', 'OpenAI API 키가 유효하지 않습니다. 운영자가 Vercel 환경변수를 확인해 주세요.');
-      if (code === 'insufficient_quota') return fail(502, 'QUOTA', 'OpenAI API 잔액 또는 사용 한도가 부족합니다. 운영자가 API 결제·한도를 확인해 주세요.');
+      if (code === 'insufficient_quota' || type === 'insufficient_quota') return fail(502, 'QUOTA', 'OpenAI API 잔액 또는 사용 한도가 부족합니다. 운영자가 API 결제·한도를 확인해 주세요.');
       if (upstream.status === 429) return fail(429, 'RATE_LIMIT', 'AI 요청이 많습니다. 잠시 후 다시 시도해 주세요.');
       if (upstream.status === 403) return fail(502, 'ACCESS', 'OpenAI 프로젝트 또는 모델 접근 권한을 확인해 주세요.');
       return fail(502, 'UPSTREAM', 'OpenAI 요청에 실패했습니다. 모델 설정과 서비스 상태를 확인해 주세요.');
