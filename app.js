@@ -1,3 +1,7 @@
+import { FreeAI } from './free-ai.js';
+import { weeklyReport, monitorReport } from './local-analysis.js';
+const freeAI=new FreeAI();
+let cancelRequest=null;
 const $ = id => document.getElementById(id);
 const today = () => { const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
 const read = (k,f) => {try{return JSON.parse(localStorage.getItem(k))??f;}catch{return f;}};
@@ -38,15 +42,47 @@ for(const [k,v] of Object.entries(state.profile)){const field=$('profileForm').e
 $('goalText').value=state.goals;$('goalForm').onsubmit=e=>{e.preventDefault();state.goals=$('goalText').value.trim();if(persist()){renderContext();toast('목표를 저장했습니다.');}};
 $('pbType').onchange=pbFields;$('pbForm').onsubmit=e=>{e.preventDefault();const k=$('pbType').value,value=k==='erg30'?Number($('pbMeters').value):seconds('pb');if(value<=0)return toast('0보다 큰 기록을 입력하세요.');const old=state.pbs[k];if(old&&(k==='erg30'?value<=old.meters:value>=old.seconds)&&!confirm('기존 PB를 이 기록으로 정정할까요?'))return;state.pbs[k]={date:today(),[k==='erg30'?'meters':'seconds']:value};if(persist()){render();toast('PB를 저장했습니다.');}};
 $('eventForm').onsubmit=e=>{e.preventDefault();const date=$('eventDate').value;if(!validDate(date))return toast('시합 날짜를 확인하세요.');state.events.push({id:crypto.randomUUID(),date,name:$('eventName').value.trim(),boat:$('eventBoat').value.trim(),goal:$('eventGoal').value.trim()});if(persist()){e.target.reset();render();toast('대회를 등록했습니다.');}};
-document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-mode]').forEach(x=>x.classList.toggle('active',x===b));for(const m of ['chat','week','photo'])$(m+'Panel').hidden=m!==b.dataset.mode;});
+document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-mode]').forEach(x=>x.classList.toggle('active',x===b));for(const m of ['chat','week','photo'])$(m+'Panel').hidden=m!==b.dataset.mode;if(b.dataset.mode==='week')$('weekFacts').textContent=weeklyReport(getContext());});
 function bubble(text,role){const el=document.createElement('div');el.className='bubble '+role;el.textContent=text;$('messages').append(el);el.scrollIntoView({block:'nearest'});return el;}
-async function requestAnalysis(mode,question='',image=null){if(busy)throw Error('현재 요청이 끝난 뒤 다시 시도하세요.');busy=true;const buttons=document.querySelectorAll('#coach button.primary');buttons.forEach(x=>x.disabled=true);$('aiStatus').textContent='OpenAI 응답 대기 중';const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),55000);try{const response=await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode,question,image,context:getContext(),history:mode==='chat'?history:[]}),signal:controller.signal});let data;try{data=await response.json();}catch{throw Error('AI API가 JSON 응답을 반환하지 않았습니다. Vercel 함수 배포 상태를 확인해 주세요.');}if(!response.ok)throw Error(data.error||`AI 오류 (${response.status})`);if(data.provider!=='openai'||!data.analysis||!data.responseId)throw Error('실제 OpenAI 응답을 확인하지 못했습니다.');$('aiStatus').textContent='실제 OpenAI 응답 확인 · '+(data.model||'');return data;}catch(e){$('aiStatus').textContent='AI 요청 실패';if(e.name==='AbortError')throw Error('AI 응답 시간이 초과되었습니다. 다시 시도하세요.');throw e;}finally{clearTimeout(timer);busy=false;buttons.forEach(x=>x.disabled=false);}}
-$('chatForm').onsubmit=async e=>{e.preventDefault();const q=$('question').value.trim();if(!q||busy)return;const pending=bubble('응답 중…','assistant');try{const d=await requestAnalysis('chat',q);pending.remove();bubble(q,'user');bubble(d.analysis,'assistant');history.push({role:'user',content:q},{role:'assistant',content:d.analysis});history=history.slice(-8);$('question').value='';}catch(err){pending.textContent=err.message;pending.classList.add('error');}};
-async function analyze(mode,id,image=null){const result=$(id);result.classList.remove('error');result.textContent='선수 데이터를 기반으로 분석 중…';try{const d=await requestAnalysis(mode,'',image);result.textContent=d.analysis;}catch(e){result.classList.add('error');result.textContent=e.message;}}
+function engineProgress(p){$('engineMessage').textContent=p.message;const bar=$('engineBar');if(Number.isFinite(p.progress))bar.value=Math.min(100,p.progress);else bar.removeAttribute('value');}
+async function requestAnalysis(mode,question='',image=null,onToken=null){
+  if(busy)throw Error('현재 요청이 끝난 뒤 다시 시도하세요.');
+  busy=true;const buttons=document.querySelectorAll('#coach button.primary, #visionPhoto, #newChat');buttons.forEach(x=>x.disabled=true);
+  $('engineProgress').hidden=false;$('aiStatus').textContent='무료 기기 처리 중 · API 비용 0원';engineProgress({message:'기기 모델 준비 중'});
+  let timer;
+  const stopped=new Promise((_,reject)=>{cancelRequest=reject;timer=setTimeout(()=>{freeAI.cancel();reject(Error('처리가 오래 걸려 중지했습니다. Wi-Fi에서 다시 시도하세요. 유료 API는 호출하지 않았습니다.'));},600000);});
+  try{
+    const task=mode==='ocr'?freeAI.recognize(image,engineProgress):freeAI.generate({mode,question,image,context:getContext(),history:mode==='chat'?history:[]},engineProgress,onToken);
+    const data=await Promise.race([task,stopped]);
+    if(mode==='ocr')$('aiStatus').textContent='실제 사진 문자인식 완료 · 무료';
+    else{if(!data.analysis||!data.responseId||!data.provider.startsWith('local'))throw Error('기기 모델의 실제 응답을 확인하지 못했습니다.');$('aiStatus').textContent='실제 기기 AI 응답 · '+data.model.split('/').at(-1);}
+    return data;
+  }catch(error){$('aiStatus').textContent='기기 처리 중지·실패 · 유료 호출 없음';throw error;}
+  finally{clearTimeout(timer);cancelRequest=null;busy=false;$('engineProgress').hidden=true;buttons.forEach(x=>x.disabled=false);}
+}
+$('cancelAI').onclick=()=>{freeAI.cancel();cancelRequest?.(Error('요청을 중지했습니다. 다시 시도할 수 있습니다.'));};
+$('newChat').onclick=()=>{history=[];$('messages').replaceChildren();bubble('새 대화를 시작했습니다. 현재 선수 기록은 계속 참고합니다.','assistant');};
+$('chatForm').onsubmit=async e=>{e.preventDefault();const q=$('question').value.trim();if(!q||busy)return;bubble(q,'user');const pending=bubble('무료 기기 AI 준비 중…','assistant');try{const d=await requestAnalysis('chat',q,null,text=>pending.textContent='기기 AI 생성 중…\n'+text);pending.textContent='무료 기기 AI · Qwen2.5\n'+d.analysis;history.push({role:'user',content:q},{role:'assistant',content:d.analysis});history=history.slice(-8);$('question').value='';}catch(err){pending.textContent=err.message;pending.classList.add('error');}};
+async function analyze(mode,id,image=null){const result=$(id);result.classList.remove('error');result.textContent='무료 기기 AI 준비 중…';try{const d=await requestAnalysis(mode,'',image,text=>result.textContent='기기 AI 생성 중…\n'+text);result.textContent=(mode==='photo'?'무료 사진 AI · 숫자를 화면과 대조하세요\n':'무료 기기 AI 해석\n')+d.analysis;}catch(e){result.classList.add('error');result.textContent=e.message;}}
+$('calculateWeek').onclick=()=>{$('weekFacts').textContent=weeklyReport(getContext());};
 $('analyzeWeek').onclick=()=>analyze('week','weekResult');
 async function imageData(file){if(!['image/jpeg','image/png','image/webp'].includes(file.type)||file.size>15*1024*1024)throw Error('15MB 이하 JPG·PNG·WebP 사진을 선택하세요.');const bitmap=await createImageBitmap(file);const canvas=document.createElement('canvas');const ratio=Math.min(1,1600/Math.max(bitmap.width,bitmap.height));canvas.width=Math.round(bitmap.width*ratio);canvas.height=Math.round(bitmap.height*ratio);canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height);bitmap.close();const data=canvas.toDataURL('image/jpeg',.85);if(data.length>2800000)throw Error('사진이 너무 큽니다. 기록 화면만 잘라 다시 선택하세요.');return data;}
-$('ergPhoto').onchange=async()=>{photo=null;const file=$('ergPhoto').files[0];if(!file)return;try{photo=await imageData(file);if(previewURL)URL.revokeObjectURL(previewURL);previewURL=URL.createObjectURL(file);$('preview').src=previewURL;$('preview').hidden=false;}catch(e){$('photoResult').textContent=e.message;}};
-$('analyzePhoto').onclick=()=>{if(!photo)return toast('분석할 사진을 먼저 선택하세요.');analyze('photo','photoResult',photo);};
+$('ergPhoto').onchange=async()=>{photo=null;$('photoSaveForm').hidden=true;$('photoResult').textContent='';$('visionResult').textContent='';const file=$('ergPhoto').files[0];if(!file)return;try{photo=await imageData(file);if(previewURL)URL.revokeObjectURL(previewURL);previewURL=URL.createObjectURL(file);$('preview').src=previewURL;$('preview').hidden=false;}catch(e){$('preview').hidden=true;$('photoResult').textContent=e.message;}};
+$('analyzePhoto').onclick=async()=>{
+  if(!photo)return toast('인식할 사진을 먼저 선택하세요.');
+  const out=$('photoResult');out.classList.remove('error');out.textContent='실제 사진 글자를 읽는 중…';
+  try{const data=await requestAnalysis('ocr','',photo);const {result,report}=monitorReport(data.text,data.confidence);out.textContent=report;
+    $('photoDate').value=today();$('photoDate').max=today();$('photoDistance').value=result.distance||'';$('photoMin').value=result.time?Math.floor(result.time/60):'';$('photoSec').value=result.time?+(result.time%60).toFixed(1):'';$('photoStroke').value=result.stroke&&result.stroke<=60?result.stroke:'';$('photoSaveForm').hidden=false;
+  }catch(error){out.classList.add('error');out.textContent=error.message;}
+};
+$('visionPhoto').onclick=()=>{if(!photo)return toast('사진을 먼저 선택하세요.');analyze('photo','visionResult',photo);};
+$('photoSaveForm').onsubmit=e=>{
+  e.preventDefault();const date=$('photoDate').value,time=Number($('photoMin').value)*60+Number($('photoSec').value);
+  if(!validDate(date)||date>today()||time<=0)return toast('날짜와 0초보다 큰 시간을 확인하세요.');
+  const v={id:crypto.randomUUID(),date,type:'에르고',distance:Number($('photoDistance').value),time,rpe:Number($('photoRpe').value),note:'Concept2 사진 · 선수 확인 후 저장'};
+  if($('photoStroke').value)v.stroke=Number($('photoStroke').value);
+  state.workouts.push(v);autoPb(v);if(persist()){render();$('photoSaveForm').hidden=true;toast('확인한 사진 기록을 저장했습니다.');}
+};
 $('exportData').onclick=()=>{const blob=new Blob([JSON.stringify({version:3,...state},null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='athletix-backup-'+today()+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
 $('importData').onchange=async()=>{try{const file=$('importData').files[0];if(!file)return;if(file.size>5000000)throw Error('백업 파일이 너무 큽니다.');const data=JSON.parse(await file.text());if(data.version!==3||!Array.isArray(data.workouts)||!Array.isArray(data.events)||typeof data.goals!=='string'||!data.profile||!data.pbs||!data.checkins||Array.isArray(data.profile)||Array.isArray(data.pbs)||Array.isArray(data.checkins)||data.workouts.some(x=>!x||typeof x.id!=='string'||!validDate(x.date)||!fields[x.type])||data.events.some(x=>!x||!validDate(x.date)||typeof x.name!=='string'))throw Error('유효한 ATHLETIX V3 백업이 아닙니다.');if(!confirm('현재 데이터를 백업 파일로 교체할까요?'))return;for(const k of Object.keys(keys))state[k]=data[k];if(persist())location.reload();}catch(e){toast(e.message);}};
 if(!localStorage.getItem('athMigrated')){const old=read('workouts',[]);if(Array.isArray(old))state.workouts.push(...old.map(x=>({id:crypto.randomUUID(),date:today(),type:fields[x.type]?x.type:'에르고',legacy:x.result||'',rpe:Number(x.rpe)||7})));if(persist())localStorage.setItem('athMigrated','1');}
