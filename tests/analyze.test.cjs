@@ -13,8 +13,10 @@ test('HTTP POST, context, image and API failure handling',async()=>{
   delete process.env.OPENAI_API_KEY;
   assert.equal((await post({mode:'chat',question:'페이스?',context})).code,'KEY_MISSING');
   process.env.OPENAI_API_KEY='test-placeholder';
+  process.env.OPENAI_API_KEY='test\nplaceholder';assert.equal((await post({mode:'week',context})).code,'KEY_FORMAT');
+  process.env.OPENAI_API_KEY='  test-placeholder\n';
   let captured;
-  global.fetch=async(url,options)=>{assert.equal(url,'https://api.openai.com/v1/responses');captured=JSON.parse(options.body);return new Response(JSON.stringify({id:'mock_response_id',model:'gpt-4o-mini',output:[{content:[{type:'output_text',text:'MOCK ONLY'}]}]}),{status:200});};
+  global.fetch=async(url,options)=>{assert.equal(url,'https://api.openai.com/v1/responses');assert.equal(options.headers.Authorization,'Bearer test-placeholder');captured=JSON.parse(options.body);return new Response(JSON.stringify({id:'mock_response_id',model:'gpt-4o-mini',output:[{content:[{type:'output_text',text:'MOCK ONLY'}]}]}),{status:200});};
   for(const mode of ['chat','week','photo']){
    const r=await post({mode,question:'나만의 질문',context,image:mode==='photo'?'data:image/jpeg;base64,YQ==':null});
    assert.equal(r.status,200);assert.equal(r.provider,'openai');
@@ -25,6 +27,7 @@ test('HTTP POST, context, image and API failure handling',async()=>{
   }
   for(const [status,code,expected] of [[401,'invalid_api_key','INVALID_KEY'],[429,'insufficient_quota','QUOTA'],[429,'rate_limit','RATE_LIMIT'],[500,'server_error','UPSTREAM'],[403,'access','ACCESS']]){global.fetch=async()=>new Response(JSON.stringify({error:{code}}),{status});assert.equal((await post({mode:'week',context})).code,expected);}
   global.fetch=async()=>new Response(JSON.stringify({output:[]}),{status:200});assert.equal((await post({mode:'week',context})).code,'EMPTY');
+  global.fetch=async()=>new Response('bad gateway',{status:502});assert.equal((await post({mode:'week',context})).code,'UPSTREAM_FORMAT');
   global.fetch=async()=>{throw Error('network');};assert.equal((await post({mode:'week',context})).code,'NETWORK');
   assert.equal((await post({mode:'photo',context,image:'bad'})).code,'IMAGE');
   assert.equal((await post({mode:'chat',context,question:''})).code,'INPUT');
